@@ -1,0 +1,28 @@
+#! /bin/sh
+# Monitor smbsync status with Nagios.
+
+cd `dirname $0`
+if [ -n "$1" ]
+then
+	sfile=$1
+else
+	cd `dirname $0`
+	sfile=smbsync-status.dat
+fi
+
+if [ ! -f "$sfile" ]
+then
+	echo "Could not find file $sfile."
+	exit 3
+fi
+
+if [ -s "$sfile" ]
+then
+	printf "SmbSync: "
+	cat $sfile
+	echo 
+	exit 1
+else
+	echo "No smbsync failures currently."
+	exit 0
+fi
