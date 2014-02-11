@@ -1,0 +1,8 @@
+Handle duplicates in configs.
+
+Support multiple logs per lmon process.
+
+Provide global/per-process global variables for substitution within regexps.
+
+Use a Perl module for process control in control.pl instead of running ps. But
+are any of them reliable?

@@ -1,0 +1,4 @@
+# A rule to catch ciss log messages, might be a broken disk in a HP DL 380
+# server (ciss is the FreeBSD driver for HP/Compaq Smart Array RAID
+# controllers):
+^.{15} (\w+) /kernel: ciss

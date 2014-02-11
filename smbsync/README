@@ -1,0 +1,67 @@
+Author
+======
+
+Anders Nordby <anders@fupp.net>
+
+License
+=======
+
+License: freeware. Feel free to send me an email if you like, have problems
+with or just that you use this software. It's nice to know.
+
+Disclaimer
+==========
+
+THIS SOFTWARE IS PROVIDED BY ANDERS NORDBY ``AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+EVENT SHALL ANDERS NORDBY BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+SmbSync
+=======
+
+SmbSync is a program to move files between Unix and Windows shares
+directly, avoiding the need for mounts or extra services like FTP or Rsync.
+It uses in and out directories, and can be configured to handle many
+directories and servers.
+
+Features:
+
+- retries uploads/downloads that fails, avoiding incomplete filetransfers.
+
+- does not touch files recently written to (may still be in use?), with
+configurable timeout.
+
+- can archive files (use RemoteDirArchive/LocalDirArchive) instead of
+deleting files transfered.
+
+- can upload/download to temporary directories (use RemoteDirTmp/LocalTmpDir)
+so that code that triggers on the files only will see complete files. Moves
+the file to the intended directory once transfer completed successfully.
+
+- configurable blocksize (Windows servers seems OK with 64K, our Hitachi
+BlueArch does not and prefers 4K).
+
+Usage
+=====
+
+Just run smbsync, or smbsync-cron.sh from cron. Update smbsync.cfg (all
+options you can set is in the sample config), and recipients in
+smbsync-cron.sh.
+
+Requirements
+============
+
+Perl 5
+
+Filesys::SmbClient
+
+Config::General
+
+The cron script needs GNU coreutils.

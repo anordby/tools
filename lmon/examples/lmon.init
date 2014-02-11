@@ -1,0 +1,16 @@
+#! /bin/sh
+
+user="monuser"
+lmonhome="/home/monuser/lmon"
+
+case $1 in
+start)
+	su - $user -c "$lmonhome/control.pl start"
+	;;
+stop)
+	su - $user -c "$lmonhome/control.pl stop"
+	;;
+status)
+	su - $user -c "$lmonhome/control.pl status"
+	;;
+esac

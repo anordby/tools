@@ -1,0 +1,17 @@
+# Rule file for excluding known data in /var/log/messages
+
+# Connection attempts:
+^.{15} (\w+) /kernel: Connection attempt to (TCP|UDP) \d+\.\d+\.\d+\.\d+:\d+ fro
+m \d+\.\d+\.\d+\.\d+:\d+$
+
+# Syslog misc:
+^.{15} (\w+) last message repeated \d+ times$
+^.{15} (\w+) newsyslog\[[0-9]+\]: logfile turned over$
+
+# ICMP Redirect
+^.{15} (\w+) /kernel: icmp redirect from [\d\.]+: [\d\.]+ => [\d\.]+$
+
+# FOO
+^.{15} (\w+) su: anders to root on /dev/tty
+^.{15} (\w+) /kernel: \w+: promiscuous mode
+^.{15} (\w+) /kernel: Limiting closed port RST response from

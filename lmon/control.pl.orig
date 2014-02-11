@@ -1,0 +1,414 @@
+#! /usr/bin/perl -T
+# control.pl 1.2 for LMon, anders@bsdconsulting.no, 2005-05-19
+# External requirements: Config::IniFiles.
+#
+# Copyright (c) 2005, Anders Nordby <anders@bsdconsulting.no>
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 
+# * Redistributions of source code must retain the above copyright notice, this
+# list of conditions and the following disclaimer.
+# 
+# * Redistributions in binary form must reproduce the above copyright notice,
+# this list of conditions and the following disclaimer in the documentation
+# and/or other materials provided with the distribution.
+# 
+# * Neither the name of BSD Consulting nor the names of its contributors may
+# be used to endorse or promote products derived from this software without
+# specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+package LMonControl;
+use Config::IniFiles;
+use FindBin qw($Bin);
+use Getopt::Std;
+use POSIX;
+use strict;
+use IPC::Open3;
+
+$ENV{PATH} = "/sbin:/bin:/usr/sbin:/usr/bin";
+$ENV{ENV} = "";
+
+$LMonControl::gensect = "general";
+$LMonControl::logvar = "log";
+$LMonControl::rulevar = "rules";
+$LMonControl::namevar = "name";
+$LMonControl::modevar = "mode";
+$LMonControl::sysnamevar = "sysname";
+$LMonControl::buffervar = "buffer";
+$LMonControl::fromvar = "from";
+$LMonControl::tovar = "to";
+$LMonControl::mailserversvar = "mailservers";
+$LMonControl::cmdok = '([-\w\.\/\ \"\@\;\_]+)';
+$LMonControl::fnok = '([-\w\.\_]+)';
+
+$LMonControl::commname = "^perl";
+$LMonControl::argcheck = "lmon\.pl";
+$LMonControl::cfgfile = "$Bin/control.cfg";
+$LMonControl::oscheck = '^(SunOS|Linux|FreeBSD)$';
+
+die("ERROR: Unknown operating system") unless ((POSIX::uname)[0] =~ /$LMonControl::oscheck/);
+
+use vars qw { $opt_i };
+
+sub readconfig {
+	if (! -f $LMonControl::cfgfile) {
+		die("ERROR: Config file $LMonControl::cfgfile not found");
+	} elsif (! -T $LMonControl::cfgfile) {
+		die("ERROR: Config file $LMonControl::cfgfile is not a text file");
+	} else {
+		tie %LMonControl::cfg, 'Config::IniFiles', ( -file => $LMonControl::cfgfile );
+	}
+}
+
+sub usage {
+	print "Usage: control.pl [options] <keyword>\n\n";
+	print "\tlist\t\t\tlist configured instances\n";
+	print "\tstart\t\t\tstart all configured instances\n";
+	print "\tstart -i <instance>\tstart given instances\n";
+	print "\tstop\t\t\tstop all configured instances\n";
+	print "\tstop -i <instance>\tstop given instances\n";
+	print "\tstatus\t\t\tprint status for all configured instances\n";
+	print "\tstatus -i <instance>\tprint status for given instance\n";
+	exit(1);
+}
+
+sub pscmd {
+	# $_[0]: cmd $_[1]: extra (optional)
+	my $cmd = $_[0];
+	my $extracmd = $_[1];
+	if ($cmd =~ /^$LMonControl::cmdok$/) {
+		$cmd = $1;
+		$cmd .= " 2>/dev/null | tail +2";
+		if ($extracmd) { $cmd .= " " . $extracmd; }
+		return `$cmd`;
+	} else {
+		return "";
+	}
+}
+
+sub instpid {
+# $_[0]: inst
+	my $inst = $_[0];
+	my $pidfile = $Bin . "/" . $inst . ".pid";
+	my $username = getpwuid(getuid);
+
+	if (! -T $pidfile) {
+		# PID file missing or not a text file
+		return 0;
+	} else {
+		open(PID, $pidfile);
+		my $regpid = <PID>;
+		close(PID);
+		chomp($regpid);
+		if (!int($regpid)) {
+			return 0;
+		} else {
+			my $psuser;
+			my $pspid;
+			my $pscomm;
+			my $psargs;
+			for ((POSIX::uname)[0]) {
+				/^(FreeBSD|Linux)$/	and do {
+					$psuser = pscmd("ps -p $regpid -oruser");
+					$psuser =~ s@\s+$@@g;
+					$pspid = pscmd("ps -p $regpid -opid");
+					$pspid =~ s@\s+$@@g;
+					$pscomm = pscmd("ps -c -p $regpid -ocommand");
+					$pscomm =~ s@\s+$@@g;
+					$psargs = pscmd("ps -ww -p $regpid -ocommand");
+					$psargs =~ s@\s+$@@g;
+					next;
+				};
+				/^SunOS$/	and do {
+					$psuser = pscmd("ps -p $regpid -oruser", "| awk '{print \$1}'");
+					$pspid = pscmd("ps -p $regpid -opid");
+					$pscomm = pscmd("ps -p $regpid -ocomm", "| xargs -n 1 basename");
+					$psargs = pscmd("ps -p $regpid -oargs");
+					next;
+				};
+			}
+			chomp($psuser);
+			chomp($pspid);
+			chomp($pscomm);
+			chomp($psargs);
+
+			if (int($pspid) && $regpid == $pspid && $psuser eq "$username" && $pscomm =~ /$LMonControl::commname/ && $psargs =~ /$LMonControl::argcheck/) {
+				return($regpid);
+			} else {
+				return(0);
+			}
+		}
+	}
+}
+
+sub statusinst {
+# $_[0]: instance name
+	my $inst = $_[0];
+	my $pid = instpid($inst);
+	if ($pid) {
+		print "$inst up, PID $pid.\n";
+	} else {
+		print "$inst down.\n";
+	}
+}
+
+sub startinst {
+# $_[0]: instance name
+	my $inst = $_[0];
+
+	print "Start lmon.pl instance $_[0]: ";
+	if (!instpid($inst)) {
+		my $cmd = "cd $Bin; ./lmon.pl -r \"" . $LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"} . "\" -f \"" . $LMonControl::cfg{"$inst"}{"$LMonControl::logvar"} . "\" -p \"" . $inst . ".pid\" -d";
+
+		if (exists $LMonControl::cfg{"$inst"}{"$LMonControl::modevar"}) {
+			if ($LMonControl::cfg{"$inst"}{"$LMonControl::modevar"} eq "include") {
+				$cmd .= " -i";
+			}
+		} elsif (exists $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::modevar"} && $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::modevar"} eq "include") {
+				$cmd .= " -i";
+		}
+
+		if (exists $LMonControl::cfg{"$inst"}{"$LMonControl::sysnamevar"}) {
+				$cmd .= " -s \"" . $LMonControl::cfg{"$inst"}{"$LMonControl::sysnamevar"} . "\"";
+		} elsif (exists $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::sysnamevar"}) {
+				$cmd .= " -s \"" . $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::sysnamevar"} . "\"";
+		}
+
+		if (exists $LMonControl::cfg{"$inst"}{"$LMonControl::fromvar"}) {
+				$cmd .= " -F \"" . $LMonControl::cfg{"$inst"}{"$LMonControl::fromvar"} . "\"";
+		} elsif (exists $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::fromvar"}) {
+				$cmd .= " -F \"" . $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::fromvar"} . "\"";
+		}
+
+		if (exists $LMonControl::cfg{"$inst"}{"$LMonControl::tovar"}) {
+				$cmd .= " -t \"" . $LMonControl::cfg{"$inst"}{"$LMonControl::tovar"} . "\"";
+		} elsif (exists $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::tovar"}) {
+				$cmd .= " -t \"" . $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::tovar"} . "\"";
+		}
+
+		if (exists $LMonControl::cfg{"$inst"}{"$LMonControl::mailserversvar"}) {
+				$cmd .= " -m \"" . $LMonControl::cfg{"$inst"}{"$LMonControl::mailserversvar"} . "\"";
+		} elsif (exists $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::mailserversvar"}) {
+				$cmd .= " -m \"" . $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::mailserversvar"} . "\"";
+		}
+
+		if (exists $LMonControl::cfg{"$inst"}{"$LMonControl::buffervar"}) {
+				$cmd .= " -b \"" . $LMonControl::cfg{"$inst"}{"$LMonControl::buffervar"} . "\"";
+		} elsif (exists $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::buffervar"}) {
+				$cmd .= " -b \"" . $LMonControl::cfg{"$LMonControl::gensect"}{"$LMonControl::buffervar"} . "\"";
+		}
+		if (exists $LMonControl::cfg{"$inst"}{"$LMonControl::namevar"}) {
+				$cmd .= " -n \"" . $LMonControl::cfg{"$inst"}{"$LMonControl::namevar"} . "\"";
+		}
+
+		if (!exists $LMonControl::cfg{"$inst"}{"$LMonControl::logvar"}) {
+			print "FAIL, instance $inst needs configuration parameter " . $LMonControl::logvar . ".\n";
+		} elsif (! -f $LMonControl::cfg{"$inst"}{"$LMonControl::logvar"}) {
+			print "FAIL, log file " . $LMonControl::cfg{"$inst"}{"$LMonControl::logvar"} . " does not exist.\n";
+		} elsif (! -f $LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"}) {
+			print "FAIL, rule file " . $LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"} . " does not exist.\n";
+		} elsif (! -T $LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"}) {
+			print "FAIL, rule file " . $LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"} . " is not a text file.\n";
+		} else {
+#			print "TRY: $cmd\n";
+
+# untaint $cmd if characters are OK, sort-of
+			if ($cmd =~ /^$LMonControl::cmdok$/) {
+				$cmd = $1;
+
+				local(*IN, *OUT, *ERR);
+				my $mypid = open3(*IN, *OUT, *ERR, $cmd);
+				close(IN);
+
+				my $errdata;
+				while (<ERR>) {
+					$errdata .= $_;
+				}
+				close(ERR);
+				close(OUT);
+				waitpid($mypid, 0);
+				my $ret = $?;
+
+				if ($ret == 0) {
+					print "OK.\n";
+				} else {
+					print "FAIL, startup problems:\n\n$errdata\n";
+				}
+			} else {
+				my $badargs = $cmd;
+				$badargs =~ s@$LMonControl::cmdok@@g;
+				print "FAIL, invalid argument characters\nin command for instance $inst (see cmdok setting or disable\n-T option for Perl): $badargs.\n";
+			}
+		}
+	} else {
+		print "FAIL, already running.\n";
+	}
+}
+
+sub stopinst {
+# $_[0]: instance name
+	my $inst = $_[0];
+
+	print "Stop lmon.pl instance $_[0]: ";
+	my $pid = instpid($inst);
+
+	if (int($pid)) {
+		if ($pid =~ /^(\d+)$/) {
+			# untaint PID
+			$pid = $1;
+
+			kill 'TERM', $pid;
+			my $pidfile = $inst . ".pid";
+			if ($pidfile =~ /^$LMonControl::fnok$/) {
+				# Untaint pidfile filename
+				$pidfile = $1;
+				if (-e $pidfile) { unlink($pidfile) };
+			}
+			print "DONE\n";
+		} else {
+			print "no valid PID number found.\n";
+		}
+	} else {
+		print "not running.\n";
+	}
+}
+
+sub fixconfig {
+	my $inst;
+	foreach $inst (keys %LMonControl::cfg) {
+		next if ($inst =~ /^$LMonControl::gensect$/);
+
+		# Fix the rule file filename/path
+		if (!exists $LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"}) {
+			# No rule file specified, use default: <instance>.rules in $Bin
+			$LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"} = $Bin . "/" . $inst . ".rules";
+		} elsif (! -f $LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"}) {
+			# Rule file not found, add $Bin before filename
+			$LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"} = $Bin . "/" . $LMonControl::cfg{"$inst"}{"$LMonControl::rulevar"};
+		}
+	}
+}
+
+sub ckpids {
+	opendir(DIR, $Bin);
+	my @dirfiles = readdir DIR;
+	closedir(DIR);
+	my $dirfile;
+	foreach $dirfile (@dirfiles) {
+		next if ($dirfile !~ /\.pid$/);
+		my $inst = $dirfile;
+		$inst =~ s@\.pid$@@;
+		my $pidfile = $Bin . "/" . $dirfile;
+
+		if (! -T $pidfile) {
+			print "WARNING: PID file $dirfile found in program dir. Not even a valid text file!\n";
+		} elsif (!exists $LMonControl::cfg{"$inst"}) {
+			print "WARNING: PID file $dirfile found in program dir, but $inst is not in config.\n";
+		} else {
+			my $dirpid = $Bin . "/" . $dirfile;
+			open(PID, $dirpid);
+			my $regpid = <PID>;
+			close(PID);
+			if (!int($regpid)) {
+				print "WARNING: PID file $dirfile found in program dir, but has no number.\n";
+			} else {
+				my $ckpid = instpid($inst);
+				if ($ckpid && $ckpid != $regpid) {
+					print "WARNING: PID file $dirfile found in program dir, but has unexpected PID.\n";
+				}
+			}
+		}
+	}
+}
+
+if ($ARGV[0]) {
+	if ($ARGV[0] =~ /^(start|stop|status)$/) {
+
+		my $keyword = $ARGV[0];
+		@ARGV = grep(!/^(start|stop|status)/, @ARGV);
+		push(@ARGV, $keyword);
+	}
+} else {
+	usage;
+}
+
+getopts('i:');
+my $inst;
+
+for ($ARGV[0]) {
+	/^start$/	and do {
+		readconfig; fixconfig;
+		if ($opt_i) {
+			if ($opt_i eq $LMonControl::gensect) {
+				print "Could not start invalid instance $opt_i.\n";
+			} elsif (exists $LMonControl::cfg{"$opt_i"}) {
+				startinst($opt_i);
+			} else {
+				print "Could not start instance $opt_i, does not exist in configuration.\n";
+			}
+		} else {
+			foreach $inst (keys %LMonControl::cfg) {
+				next if ($inst =~ /^$LMonControl::gensect$/);
+				startinst($inst);
+			}
+		}
+		next;
+	};
+	/^stop$/	and do {
+		readconfig;
+		if ($opt_i) {
+			if (exists $LMonControl::cfg{"$opt_i"}) {
+				stopinst($opt_i);
+			} else {
+				print "Could not stop instance $opt_i, does not exist in configuration.\n";
+			}
+		} else {
+			foreach $inst (keys %LMonControl::cfg) {
+				next if ($inst =~ /^$LMonControl::gensect$/);
+				stopinst($inst);
+			}
+		}
+		next;
+	};
+	/^list$/	and do {
+		readconfig;
+		print "Instances:\n\n";
+		foreach $inst (keys %LMonControl::cfg) {
+			next if ($inst =~ /^$LMonControl::gensect$/);
+			print "$inst\n";
+		}
+		next;
+	};
+	/^status$/	and do {
+		readconfig;
+		if ($opt_i) {
+			if (exists $LMonControl::cfg{"$opt_i"}) {
+				statusinst($opt_i);
+			} else {
+				print "Will not check status for instance $opt_i,\ndoes not exist in configuration.\n";
+			}
+		} else {
+			foreach $inst (keys %LMonControl::cfg) {
+				next if ($inst =~ /^$LMonControl::gensect$/);
+				statusinst($inst);
+			}
+			ckpids;
+		}
+		ckpids;
+		next;
+	};
+	usage;
+}

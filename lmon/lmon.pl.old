@@ -1,0 +1,297 @@
+#! /usr/bin/perl -T
+# LMon 1.3, anders@bsdconsulting.no, 2005-05-19
+# External requirements: Mail::Sendmail, File::Tail.
+#
+# History:
+#
+# 1.3:	Add / as allowed character in filename.
+#	Send mail as bulk mail, to avoid bounces.
+#	Use config file instead of command line options for most things.
+
+package LMon;
+use Fcntl;
+use Getopt::Std;
+use POSIX;
+use strict;
+use Mail::Sendmail;
+use File::Tail;
+use FindBin qw($Bin);
+use Config::IniFiles;
+use Proc::ProcessTable;
+
+$ENV{PATH} = "/sbin:/bin:/usr/sbin:/usr/bin";
+$ENV{ENV} = "";
+
+# --configuration ---
+$LMon::mailservers = ['smtp1.tld.com', 'smtp2.tld.com'];
+$LMon::recipients = "user\@tld.com";
+$LMon::from = "user\@tld.com";
+# How many lines to read initially from log:
+$LMon::lines = 0;
+# How many lines to read initially from log if rotated:
+$LMon::resetlines = -1;
+# For lines/resetlines, 0 = only read new lines, -1 = read everything.
+# How long to wait before checking log buffer:
+$LMon::waitsecs = 5;
+# How long to wait before checking log buffer after a mail is sent:
+$LMon::waitsecsnext = 3600;
+# Max buffer lines, set to 0 for unlimited (otherwise drop lines from the top):
+$LMon::maxbuffer = 50;
+# --- end configuration ---
+
+$LMon::cfgfile = "$Bin/lmon.cfg";   
+
+# Copyright (c) 2007, Anders Nordby <anders@bsdconsulting.no>
+# All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 
+# * Redistributions of source code must retain the above copyright notice, this
+# list of conditions and the following disclaimer.
+# 
+# * Redistributions in binary form must reproduce the above copyright notice,
+# this list of conditions and the following disclaimer in the documentation
+# and/or other materials provided with the distribution.
+# 
+# * Neither the name of BSD Consulting nor the names of its contributors may
+# be used to endorse or promote products derived from this software without
+# specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+@LMon::reglist = ();
+@LMon::logbuffer = ();
+$LMon::logfile = ();
+$LMon::logbuffertruncated = 0;
+$LMon::fnok = '([-\w\.\_\/]+)';
+
+use vars qw { $opt_f $opt_p $opt_r $opt_n $opt_s $opt_i $opt_t $opt_F $opt_b $opt_m $opt_d };
+
+# Untaint $Bin if OK
+if ($Bin =~ /$LMon::fnok/) {
+	$Bin = $1;
+}
+
+sub usage {
+	print "Usage: lmon.pl -r <rule file> -f <log file> [-t <recipients>] [-p <pid file>]\n";
+	print "[-n <log name (for alerts)>] [-s <system name (for alerts)]\n";
+	print "[-i (include mode: alert on rule hits instead of misses) [-F <from mailaddress>]\n";
+	print "[-m <mail server(s)>] [-d (detach)]\n";
+}
+if ($#ARGV < 0) { usage; exit(0); }
+getopts('r:f:t:p:n:s:F:b:im:d');
+if ($opt_t) {
+	$LMon::recipients = $opt_t;
+}
+if ($opt_b) {
+	$LMon::maxbuffer = $opt_b;
+}
+
+my $line = "";
+
+if ($opt_s) {
+	$LMon::sysname = $opt_s;
+} else {
+	$LMon::sysname = (POSIX::uname)[1];
+}
+if (!$LMon::from) {
+	$LMon::from = "hostmaster\@$LMon::sysname";
+} elsif($opt_F) {
+	$LMon::from = $opt_F;
+}
+
+
+if ($opt_i) {
+	$LMon::alertstr = "LMon: interesting data in";
+} else {
+	$LMon::alertstr = "LMon: unrecognized data in";
+}
+
+if ($opt_m) {
+	@LMon::mailserverstxt = split(/ /, $opt_m);
+	$LMon::mailservers = \@LMon::mailserverstxt;
+	for (my $i = 0; $i <= $#LMon::mailserverstxt; $i++) {
+		if ($LMon::mailserverstxt[$i] =~ /^([\s\w\.-_]+)$/) {
+			# untaint mailserver
+			$LMon::mailserverstxt[$i] = $1;
+		} else {
+			print "Bad data $opt_m in option -m.\n";
+			exit(1);
+		}
+	}
+	$Mail::Sendmail::mailcfg{'smtp'} = \@LMon::mailserverstxt;
+} else {
+	$Mail::Sendmail::mailcfg{'smtp'} = $LMon::mailservers;
+}
+
+sub errusage {
+	my $msg = $_[0];
+	print "$msg\n\n";
+	usage;
+	exit(1);
+}
+
+sub sender {
+	my $text = "$_[0]";
+	my $subject = "$_[1]";
+
+	for my $recipient (split /([ \s,;])/, $LMon::recipients) {
+		my %mail = ( To      => "$recipient",
+			     From    => "$LMon::from",
+			     Message => "$text",
+			     Subject => "$subject",
+			     Precedence => "bulk"
+		);
+
+	sendmail(%mail);
+	}
+}
+
+sub isinteresting {
+	my $str = $_[0];
+	chomp($str);
+	my $substr;
+
+	if ($opt_i) {
+		for (my $i = 0; $i <= $#LMon::reglist; $i++) {
+			if (substr($LMon::reglist[$i], 0, 1) eq '!') {
+				$substr = substr($LMon::reglist[$i], 1);
+				if ($str !~ /$substr/) { return(1); }
+			} else {
+				if ($str =~ /$LMon::reglist[$i]/) { return(1); }
+			}
+		}
+		return(0);
+	} else {
+		for (my $i = 0; $i <= $#LMon::reglist; $i++) {
+			if (substr($LMon::reglist[$i], 0, 1) eq '!') {
+				$substr = substr($LMon::reglist[$i], 1);
+				if ($str !~ /$substr/) { return(0); }
+			} else {
+				if ($str =~ /$LMon::reglist[$i]/) { return(0); }
+			}
+		}
+		return(1);
+	}
+}
+
+sub sendbuffer {
+	if($LMon::logbuffertruncated != 0) {
+		unshift(@LMon::logbuffer, "\n");
+		unshift(@LMon::logbuffer, "from the top of the file.\n");
+		unshift(@LMon::logbuffer, "ERROR: Log buffer got full at $LMon::maxbuffer lines. Data has been dropped\n");
+		$LMon::logbuffertruncated = 0;
+	}
+	if ($opt_n) {
+		sender(join("", @LMon::logbuffer), "$LMon::alertstr $opt_n on $LMon::sysname");
+	} else {
+		sender(join("", @LMon::logbuffer), "$LMon::alertstr $opt_f on $LMon::sysname");
+	}
+}
+
+sub checkbuffer {
+	if ($#LMon::logbuffer != -1) {
+		sendbuffer;
+		@LMon::logbuffer = ();
+		alarm($LMon::waitsecsnext);
+	} else {
+		alarm($LMon::waitsecs);
+	}
+}
+
+sub fixpidfilename {
+	if ($opt_p =~ /^([-\w\.\/]+)$/) {
+		# untaint PID filename
+		$opt_p = $1;
+	} else {
+		print "Bad data $opt_p in option -p.\n";
+		exit(1);
+	}
+}
+
+sub writepid {
+	fixpidfilename;
+	if (sysopen(PID, $opt_p, O_WRONLY|O_CREAT)) {
+		print PID "$$\n";
+	} else {
+		errusage("ERROR: Could not write pid file.");
+	}
+	close(PID);
+}
+
+sub readrules {
+	sysopen(CONF, $opt_r, O_RDONLY);
+	@LMon::reglist = ();
+	my $line = 0;
+	while (<CONF>) {
+		my $rule = $_;
+		$line++;
+
+		next if ($rule =~ /^(#|$)/);
+		chomp($rule);
+
+		eval { if (/$rule/) {} };
+		if ($@) {
+			print STDERR "ABORT, syntax/regexp error on line $line in $opt_r.\n";
+			print STDERR "Details:\n\n";
+			print STDERR $@;
+			close(CONF);
+			exit(1);
+		}
+
+		push(@LMon::reglist, $rule);
+	}
+	close(CONF);
+}
+
+if (!$opt_f) {
+	errusage("ERROR: No file to monitor specified, use -f.");
+} elsif(! -f $opt_f) {
+	errusage("ERROR: Logfile $opt_f does not exist/is not a file.");
+}
+if (!$opt_r) {
+	errusage("ERROR: No rule file specified, use -r.");
+} elsif(! -f $opt_r) {
+	errusage("ERROR: Rule file $opt_r does not exist/is not a file.");
+}
+readrules;
+if ($opt_d) {
+	# Detach from controlling terminal
+	exit 0 if (fork);
+	chdir($Bin);
+	close(STDERR);
+	close(STDOUT);
+	close(STDIN);
+	POSIX::setsid;
+}
+writepid;
+
+$SIG{ALRM} = sub { checkbuffer; };
+alarm($LMon::waitsecs);
+
+#$LMon::logfile = File::Tail->new($opt_f);
+$LMon::logfile = File::Tail->new(name=>$opt_f, maxinterval=>30, interval=>10, tail=>$LMon::lines, reset_tail=>$LMon::resetlines, errmode=>"return");
+
+while(defined($line=$LMon::logfile->read)) {
+	if (isinteresting($line)) {
+		if (($#LMon::logbuffer+1) >= $LMon::maxbuffer && $LMon::maxbuffer != 0) {
+			if ($LMon::logbuffertruncated == 0) {
+				$LMon::logbuffertruncated = 1;
+			}
+			shift(@LMon::logbuffer);
+			push(@LMon::logbuffer, $line);
+		} else {
+			push(@LMon::logbuffer, $line);
+		}
+	}
+}

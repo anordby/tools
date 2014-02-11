@@ -1,0 +1,139 @@
+DESCRIPTION
+===========
+
+LMon is a package for near real-time monitoring of logs, sending e-mail
+alerts upon known (rule hits) or unknown data (rule misses).
+
+Features:
+
+- Buffer multiple rule hits within a given interval, cap at a given maximum
+number of lines, wait for a given interval before sending next alert.
+
+- Auto-discovery of log rotation.
+
+- Simplicity. LMon can run from the command line without configuration, or
+be controlled from a central configuration file with multiple instances
+monitoring different log files/sending alerts to different people. It is very
+much intended to be simple (Keep It Simple, Stupid).
+
+USAGE
+=====
+
+To monitor individual logs from the command line, run lmon.pl. Start it without
+arguments to see what options are possible. You may want to edit configuration
+defaults in it. A rule file is a text file containing Perl regexps to look for
+in the log file. Use # in the beginning of eventual comments, blank lines are
+also ignored. Be careful not to insert apparently blank lines with whitespace,
+if you don't want to monitor whitespace. You can start a line with ! to perform
+an inverted match.
+
+To control the startup/shutdown of lmon in several instances, use control.pl.
+That script can be linked up as a rc.d/init.d start, but if you want to run log
+monitoring as a different user, see the lmon.init example startup script. To
+see possible options/keywords for control.pl, start it without arguments.
+Reasons for running lmon.pl in several instances can be to monitor different
+log files (lmon can only one log file), to send alerts to different mail
+addresses (only one set of mail addresses per lmon), and/or to use different
+rule files or other options. The configuration file, control.cfg, will be
+looked for in the same directory as control.pl. The format of it is divided
+into sections enclosed in [], where each section is one instance of lmon. The
+name general is special, it will set global defaults.
+
+Valid options for general and per instance (all optional):
+
+sysname= (pretend alert was sent from this system, useful for FreeBSD jails
+when monitoring outside them)
+
+mode=include (set this to alert on rule hits, anything else for misses -
+default is to alert on rule misses)
+
+from= (mail address to send alerts from)
+
+to= (mail addresses to send alerts to)
+
+mailservers= (smtp servers, alerts will be sent through one of them directly)
+
+buffer=<max lines to buffer> (cap rule hits when exceeding this limit)
+
+pid=<pid file> (default is <instance name>.pid in LMon's directory)
+
+Required instance options:
+
+log=<log file> (log file to monitor)
+
+Optional instance options:
+
+rules=<rule file> (rule file with regexps to look for, default is
+<instance name>.rules in LMon's directory)
+
+name=<log name> (mention log as this log name in alerts)
+
+You may want to have a look in the examples directory for sample control.cfg
+and rule files.
+
+For the command line option/keyword listings from the programs, [] means
+something that is optional, () is an explanation, and <> is a required option
+within that context. Do not include them, substitute with what you want
+instead. For the command line, if you want to use spaces/whitespace in an
+option, enclose it in "". In control.cfg, do not enclose options in "", use
+whitespace as needed but keep it on one line.
+
+NB: Without adjusting $LMon::lines, lmon will only discover new log lines.
+
+REQUIREMENTS
+============
+
+Perl 5 is required. Also, lmon.pl needs Mail::Sendmail and File-Tail, and
+control.pl needs Config::IniFiles. Download Perl from www.perl.org, and Perl
+modules from www.cpan.org.
+
+Target platforms are initially FreeBSD, Solaris and Linux. Other platforms
+may be supported upon request and/or feedback. Particularly the control.pl
+script may need modifications for other operating systems because of its
+picky usage of ps.
+
+You may need to set the path for the Perl programs, if it does not exist as
+/usr/bin/perl.
+
+HISTORY
+=======
+
+2004-12-29: Initial version released.
+
+2005-04-18: Version 1.1
+
+- Add possibility to set mail servers from the command line for lmon.pl, and
+from control.cfg.
+- Bug fix: improve checks for running processes (use getuid instead of
+getlogin to determine which users processes to look for, remove leading
+blankspace from ps output, assume perl.* process name, not just perl).
+- Add posibility to use ! in the start of a rule, to invert the match(ing).
+
+2005-04-18: Version 1.1a
+
+Correct silly subject typo.
+
+2005-05-19: Version 1.2
+
+- Misc. bugfixes for control.pl: fix pidfile filename taint problem and -i
+option not working with status and stop commands.
+- Add validation of rules (regexp correctness) to lmon.pl at startup, exit
+with details about the errors if there are any. Make control.pl print this
+information also. Without this validation, lmon could start but exit once
+there is new data in the monitored logfile.
+- Add detach option for lmon.pl. Default is to run in the foreground.
+
+LICENSE
+=======
+
+See the file LICENSE.
+
+AUTHOR/HOMEPAGE
+===============
+
+Anders Nordby <anders@bsdconsulting.no>
+
+URL: http://www.bsdconsulting.no/tools/
+
+You are hereby encouraged to send any modifications/improvements, tips or
+feedback back to the author.

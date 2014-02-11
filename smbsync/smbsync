@@ -1,0 +1,446 @@
+#! /usr/bin/perl
+# -T
+# SmbSync v1.1
+# - A program to move files between Unix and Windows shares
+# Author: Anders Nordby <anders@fupp.net>
+# 
+# 2008-09-14: Initial version
+# 2008-09-22: Skip directories in get
+# 2009-01-13: Speed improvement, close file check correction.
+# 2009-01-27: Add support for archiving files
+# 2009-02-11: Lower default blocksize to 4K, add config option to set it
+#             Print block info.
+# 2009-02-16: v1.0: Fix for newer Filesys::SmbClient versions.
+# 2013-01-08: v1.1: Improved error reporting, write status file for monitoring
+#                   + Nagios plugin, add option to remove lock file
+#
+# TODO:		Move option/sync (do not re-upload if not moving).
+#		Print same output to STDERR and STDOUT only if not a tty
+
+package SmbSync;
+#use strict;
+use Time::HiRes qw( gettimeofday );
+use POSIX;
+use File::Basename;
+use Config::General;
+use Filesys::SmbClient;
+use FindBin qw($Bin);
+use Getopt::Std;
+use Data::Dumper;
+getopts('c:');
+
+if ($opt_c) {
+	$SmbSync::cfgfn = $opt_c;
+} else {
+	$SmbSync::cfgfn = $Bin . "/smbsync.cfg";
+}
+
+%SmbSync::options = (
+	-ConfigFile => $SmbSync::cfgfn,
+	-AllowMultiOptions => "no",
+	-LowerCaseNames => "yes",
+);
+
+$conf_obj = new Config::General(%SmbSync::options);
+%conf = $conf_obj->getall();
+
+sub err {
+	$errtxt = shift;
+	print STDERR "ERROR: $errtxt\n";
+	print "ERROR: $errtxt\n";
+	# No period at end of status text (there may be multiples):
+	$errtxt =~ s@\.$@@;
+	$status .= "$errtxt, ";
+}
+sub reason {
+	my $reason = $!;
+	print STDERR "Reason1: $reason X\n";
+	print "Reason2: $reason X\n";
+}
+sub smbunlink {
+	# $_[0]= smbfn
+	my $smbfn = shift;
+	if ($smb->unlink($smbfn)) {
+		print "Deleted it.\n"; return(1);
+	} else {
+		err "Could not delete it."; reason; return(0);
+	}
+}
+
+sub get {
+	# $_[0]: filename $_[1]: local dir $_[2]: local dir tmp [3]: force
+	# $_[4]: smb remote dir $_[5]: smb remote archive dir
+	my $basefn = shift;
+	my $ldir = shift;
+	my $ldirtmp = shift;
+	my $force = shift;
+	my $remotedir = shift;
+	my $remotedirarchive = shift;
+	my $fn = $remotedir . "/" . $basefn;
+	my $l;
+	my $fd;
+	my $lfn;
+	my $lfnfin;
+
+	my $lsize, $rsize;
+	my $ssec, $smsec, $esec, $emsec, $utime;
+	my $i;
+
+	if ($ldirtmp) {
+		$lfn = $ldirtmp . "/" . $basefn;
+		$lfnfin = $ldir . "/" . $basefn;
+	} else {
+		$lfn = $ldir . "/" . $basefn;
+	}
+
+	if (!$force) {
+		if (-f $lfn) {
+			err "File $lfn already exists.\nWill not overwrite. Aborting.";
+			return(0);
+		}
+		if ($ldirtmp && -f $lfnfin) {
+			err "File $lfnfin already exists.\nWill not overwrite. Aborting.";
+			return(0);
+		}
+	}
+	if (!($fd = $smb->open($fn, 0666))) {
+		err "Could not open $fn for reading."; reason;
+		return(0);
+	}
+	if (!open(NEWFILE, ">$lfn")) {
+		err "Could not open $lfn for writing.";
+		if (-f $lfn) {
+			err "But $lfn still exists? Huh. Deleting it.";
+			unlink($lfn);
+		}
+		$smb->close(fd);
+		return(0);
+	}
+
+	$i=0;
+	($ssec, $smsec) = gettimeofday;
+	while (1) {
+		$i++;
+#		if ($i == 1 ) { print "Start read..\n"; }
+		# Use blocksize $blocksize:
+		$l = $smb->read($fd, $blocksize);		
+		$etxt = $!;
+		# No (default) block size:
+		# $l = $smb->read($fd);
+#		print "Read block $i..\n";
+#		if (int($l) == -1) {
+		if ($etxt ne "") {
+			err "ERROR reading $fn from remote. Aborting."; reason;
+			
+			if (fileno(fd)) { $smb->close(fd); }
+			close(NEWFILE);
+			if (-f $lfn) { unlink($lfn); }
+			return(0);
+		} elsif (length($l) == 0) {
+			print "OK. Finished reading file, eof.\n";
+			last;
+		} elsif (defined($l)) {
+#			print "Read some, write some..\n";
+			print NEWFILE $l;
+		} else {
+			print "OK. Finished reading file, undef.\n";
+			last;
+		}
+	}
+	close(NEWFILE);
+	if ($smb->close($fd) == 0) {
+		print "Remote file closed OK, read $i blocks of $blocksize bytes.\n";
+	} else {
+		print "Remote file close error.\n"; reason;
+	}
+	($esec, $emsec) = gettimeofday;
+	$utime = ($esec+($emsec/1000000))-($ssec+($smsec/1000000));
+	printf("Time spent: %.2f seconds\n", $utime);
+	$rsize = ($smb->stat($fn))[7];
+	printf("Finished download of %.2f MB, %.2f MB/sec.\n", $lsize/1024/1024, ($rsize/1024/1024)/$utime);
+
+	$lsize = (stat($lfn))[7];
+	if ($lsize==$rsize) {
+		print "Downloaded file has same size as remote file. Good.\n";
+	} else {
+		err "Downloaded file has different size ($lsize)\nthan remote file ($rsize). Delete it.";
+		if (!$rsize) { reason; }
+		if (-f $lfn) { unlink($lfn); }
+		return(0);
+	}
+
+	if ($ldirtmp) {
+		if (rename($lfn,$lfnfin)) {
+			print "Moved from temp dir to final dir.\n";
+		} else {
+			err "Could not move $fn from tempdir $ldirtmp\nto final dir $ldir.\nDeleting and aborting.";
+			if (-f $lfn) { unlink($lfn); }
+			return(0);
+		}
+	}
+	
+	print "Download OK.\n";
+	if ($remotedirarchive) {
+		if ($smb->rename($fn,$remotedirarchive . "/" . $basefn)) {
+			print "Moved to archive dir on remote.\n";
+		} else {
+			err "Could not move $basefn from $remotedir\nto archive dir $remotedirarchive on remote."; reason;
+			return(0);
+		}
+
+	
+	} else {
+		if (smbunlink($fn)) {
+			print "Deleted file $fn from remote server.\n";
+		} else {
+			err "Could not delete file $fn from remote server.";
+			return(0);
+		}
+	}
+
+	return(1);
+}
+
+sub put {
+	# $_[0]: filename $_[1]: remote dir $_[2]: remote dir tmp $_[3]: force
+	# $_[4]: local dir $_[5]: local archive dir
+	my $basefn = shift;
+	my $rdir = shift;
+	my $rdirtmp = shift;
+	my $force = shift;
+	my $localdir = shift;
+	my $localdirarchive = shift;
+	my $fn = $localdir . "/" . $basefn;
+	my $l;
+	my $fd;
+	my $lfn;
+	my $lfnfin;
+	my $buf;
+	my $i;
+
+	my $lsize, $rsize;
+	my $ssec, $smsec, $esec, $emsec, $utime;
+
+	if ($rdirtmp) {
+		$rfn = $rdirtmp . "/" . $basefn;
+		$rfnfin = $rdir . "/" . $basefn;
+	} else {
+		$rfn = $rdir . "/" . $basefn;
+	}
+
+	if (!$force) {
+		if ($smb->stat($rfn)) {
+			err "File $rfn already exists.\nWill not overwrite. Aborting.";
+			return(0);
+		}
+		if ($rdirtmp && $smb->stat($rfnfin)) {
+			err "File $rfnfin already exists.\nWill not overwrite. Aborting.";
+			return(0);
+		}
+	}
+	if (!open(FILE, $fn)) {
+		err "Could not open $fn for reading.";
+		return(0);
+	}
+	if (!($fd = $smb->open(">$rfn", 0666))) {
+		err "Could not open $rfn for writing"; reason;
+		return(0);
+	}
+
+	print "Uploading file $fn\n";
+	$i = 0;
+	($ssec, $smsec) = gettimeofday;
+	while (read(FILE, $buf, $blocksize)) {
+		$i++;
+		if (!$smb->write($fd, $buf)) {
+			err "Writing $rfn on remote. Aborting."; reason;
+			close(FILE);
+			$smb->close(fd);
+			smbunlink($rfn);
+			return(0);
+		}
+	}
+	close(FILE);
+	if ($smb->close($fd) == 0) {
+		print "Remote file closed OK, wrote $i blocks of $blocksize bytes.\n";
+	} else {
+		print "Remote file close error.\n"; reason;
+	}
+	($esec, $emsec) = gettimeofday;
+	$utime = ($esec+($emsec/1000000))-($ssec+($smsec/1000000));
+	printf("Time spent: %.2f seconds\n", $utime);
+	$lsize = (stat($fn))[7];
+	printf("Finished upload of %.2f MB, %.2f MB/sec.\n", $lsize/1024/1024, ($lsize/1024/1024)/$utime);
+
+	$rsize = ($smb->stat($rfn))[7];
+	if ($lsize==$rsize) {
+		print "Uploaded file has same size as remote file. Good.\n";
+	} else {
+		err "Uploaded file has different local size ($lsize)\nthan remote file ($rsize). Delete it.";
+		if (!$rsize) { reason; }
+		smbunlink($rfn);
+		return(0);
+	}
+
+	if ($rdirtmp) {
+		if ($smb->rename($rfn,$rfnfin)) {
+			print "Moved from temp dir to final dir on remote.\n";
+		} else {
+			err "Could not move $fn from tempdir $ldirtmp\nto final dir $ldir on remote.\nDeleting and aborting."; reason;
+			smbunlink($rfn);
+			return(0);
+		}
+	}
+
+	print "Upload OK\n";
+	if ($localdirarchive) {
+		if (rename($fn,$localdirarchive . "/" . $basefn)) {
+			print "Moved to local archive dir.\n";
+		} else {
+			err "Could not move file $basefn from local dir $localdir\nto local archive dir $localdirarchive";
+			return(0);
+		}
+	} else {
+		if (unlink($fn)) {
+			print "Deleted $fn from local server.\n";
+		} else {
+			err "Could not delete $fn locally.\n";
+			return(0);
+		}
+	}
+
+	return(1);
+}
+
+#print "Config dump:\n";
+#print Dumper(%conf);
+#exit(0);
+
+my $server, $dir;
+my $localdir, $localdirtmp, $remotedir, $remotedirtmp;
+my $put, $get, $fd, $f, $mytime, $ftime, $fileage, $minfileage, $blocksize;
+my $statusfile;
+
+$status = "";
+
+if (exists($conf{"statusfile"})) {
+	$statusfile = $conf{"statusfile"};
+} else {
+	$statusfile = $SmbSync::cfgfn = $Bin . "/smbsync-status.dat";
+}
+if (exists($conf{"minfileage"})) {
+	$minfileage = $conf{"minfileage"};
+} else {
+	$minfileage = 30;
+}
+if (exists($conf{"blocksize"})) {
+	$blocksize = $conf{"blocksize"};
+} else {
+	$blocksize = 4096;
+}
+
+#print "Keys and values:\n";
+foreach $server (keys %{ $conf{"server"} }) {
+	print "Sync files with server: $server ===>\n";
+	foreach $dir (keys %{ $conf{"server"}{"$server"}{"directory"} }) {
+		print "Directory: $dir\n";
+
+		if (exists($conf{"server"}{"$server"}{"username"})
+			&& exists($conf{"server"}{"$server"}{"password"})
+			&& exists ($conf{"server"}{"$server"}{"workgroup"})) {
+			$smb = new Filesys::SmbClient(
+				username => $conf{"server"}{"$server"}{"username"},
+				password => $conf{"server"}{"$server"}{"password"},
+				workgroup => $conf{"server"}{"$server"}{"workgroup"});
+
+			$localdir = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"localdir"};
+			$localdirarchive = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"localdirarchive"};
+			$localdirtmp = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"localdirtmp"};
+			$remotedir = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"remotedir"};
+			$remotedirarchive = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"remotedirarchive"};
+			$remotedirtmp = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"remotedirtmp"};
+			$put = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"put"};
+			$get = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"get"};
+
+			if ($conf{"server"}{"$server"}{"directory"}{"$dir"}{"force"}) {
+				$force = $conf{"server"}{"$server"}{"directory"}{"$dir"}{"force"};
+			} elsif ($conf{"force"}) {
+				$force = $conf{"force"};
+			}
+
+			if ($put) {
+				if ($remotedir && $localdir) {
+					print "Put files $put:\n";
+					opendir(DIR, $localdir);
+					foreach $f (readdir(DIR)) {
+						next if ($f =~ /^(\.|\.\.)$/);
+						if ($f =~ /^$put$/ && -f "$localdir/$f") {
+							print "Upload: $localdir/$f\n";
+							$mytime = int(time);
+							$ftime = (stat("$localdir/$f"))[9];
+							$fileage = $mytime-$ftime;
+							if ($fileage >= $minfileage) {
+#								put("$localdir/$f", $remotedir, $remotedirtmp, $force);
+								put($f, $remotedir, $remotedirtmp, $force, $localdir, $localdirarchive);
+							} else {
+								print "Skipped, age is just $fileage (minimum $minfileage)\n";
+							}
+						}
+					}
+					closedir(DIR);
+				} else {
+					err "RemoteDir and LocalDir must be defined.";
+				}
+			}
+
+			if ($get) {
+				if ($remotedir && $localdir) {
+					print "Get files $get:\n";
+					if ($fd = $smb->opendir($remotedir)) {
+# 						foreach $f ($smb->readdir($fd)) {
+ 						while ($fs = $smb->readdir_struct($fd)) {
+							$t = $fs->[0];
+							$f = $fs->[1];
+							# fil er type 8
+							next if ($f =~ /^(\.|\.\.)$/ || $t != 8);
+							if ($f =~ /^$get$/) {
+								print "Download: $remotedir/$f\n";
+								$mytime = int(time);
+								$ftime = ($smb->stat("$remotedir/$f"))[11];
+								$fileage = $mytime-$ftime;
+								if ($fileage >= $minfileage) {
+									get($f, $localdir, $localdirtmp, $force, $remotedir, $remotedirarchive);
+								} else {
+									print "Skipped, age is just $fileage (minimum $minfileage)\n";
+								}
+							}
+						}
+						$smb->closedir($fd);
+					} else {
+						err "Could not read remote dir $remotedir."; reason;
+					}
+				} else {
+					err "RemoteDir and LocalDir must be defined.";
+				}
+			}
+
+
+
+
+		} else {
+			print "Username/password/workgroup not defined.\n";
+		}
+	}
+}
+
+# Write status file
+$statusfilesize = (stat($statusfile))[7];
+$status =~ s@, $@@;
+unless ($status eq "" && -e $statusfile && $statusfilesize == 0) {
+	open(STATUS, ">$statusfile");
+	print STATUS "$status";
+	close(STATUS);
+}
+#print "statusfile=$statusfile statusfilesize=$statusfilesize status=$status\n";
+#$status .= "$errtxt, ";
+

@@ -1,0 +1,6 @@
+# Catch common JBoss problems. I recommend logging the standard output/error of
+# JBoss using flog (http://oss.ezic.com/), to be sure you catch any Java
+# problems unavailable to JBoss' own logging system:
+java.lang.OutOfMemoryError
+org.jboss.util.NestedSQLException
+java.io.InterruptedIOException
