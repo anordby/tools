@@ -1,0 +1,28 @@
+How to set it up:
+~~~~~~~~~~~~~~~~~
+
+a) Install the Mail::Sendmail module. The easiest way to do that is to use
+CPAN:
+
+# perl -MCPAN -e shell
+(Answer no to the question about manual configuration.)
+cpan> install Mail::Sendmail
+
+b) Change variables and what to monitor in simplemon.cfg. Make sure you write
+correct Perl syntax.
+
+c) Start simplemon.pl simply by running it.
+
+That's it!
+
+Where to get updates:
+~~~~~~~~~~~~~~~~~~~~~
+
+http://anders.fix.no/software/#unix
+
+Author
+~~~~~~~
+
+Anders Nordby <anders@fix.no>
+
+Let me know if you found this software useful. :)
