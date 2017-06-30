@@ -77,7 +77,7 @@ $global:iterations = $iterations
 $global:direct = $direct
 
 #exit 0
-$ckstring = "<title>Mtakst Mobil</title>"
+$ckstring = "<title>Foo App</title>"
 $timeout = 5
 $responses = @{}
 
