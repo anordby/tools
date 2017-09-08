@@ -1,0 +1,139 @@
+#! /usr/bin/ruby
+# Post Nagios monitoring results to HipChat
+# Anders Nordby <anders@fupp.net>, 2015-11-11
+
+require 'optparse'
+require 'httparty'
+
+options = {}
+OptionParser.new do |opts|
+  opts.banner = "Usage: hiparty.rb [options]"
+
+  opts.on("-t", "--token TOKEN", "Token") do |a|
+    options[:token] = a
+  end
+  opts.on("-r", "--room ROOMID", "Room ID") do |a|
+    options[:room] = a
+  end
+  opts.on("-H", "--host HOST", "Hostname") do |a|
+    options[:host] = a
+  end
+  opts.on("-T", "--type TYPE", "Type (host or service)") do |a|
+    options[:type] = a
+  end
+
+  opts.on("-o", "--output OUTPUT", "Output") do |a|
+    options[:output] = a
+  end
+  opts.on("-c", "--comment COMMENT", "Comment") do |a|
+    options[:comment] = a
+  end
+  opts.on("-s", "--state STATE", "State") do |a|
+    options[:state] = a
+  end
+  opts.on("-d", "--description DESCRIPTION", "Service description") do |a|
+    options[:description] = a
+  end
+  opts.on("-n", "--ntype NTYPE", "Notification type") do |a|
+    options[:ntype] = a
+  end
+end.parse!
+
+# RECOVERY
+# ACKNOWLEDGEMENT
+# PROBLEM
+# FLAPPINGSTART
+# FLAPPINGSTOP
+
+nowtime = DateTime.now.strftime("%Y-%m-%d %H:%M:%S").to_s
+logfile = "/var/log/nagios/hiparty.log"
+
+case options[:state]
+when "OK"
+	color = "green"
+when "WARNING","UNKNOWN"
+	color = "yellow"
+when "CRITICAL"
+	color = "red"
+else
+	if options[:type] == "host"
+		case options[:state]
+		when "UP"
+			color = "green"
+		when "DOWN", "UNREACHABLE"
+			color = "red"
+		else
+			color = "gray"
+		end
+	else
+		color = "gray"
+	end
+end
+
+output = options[:output]
+if output.match(/http:\/\//)
+	# Make links clickable
+	output = output.gsub(/(http:\/\/h\.bar\.local\/\w+)/, '<a href="\1">\1</a>')
+end
+
+host = options[:host]
+description = options[:description]
+ntype = options[:ntype]
+
+nowtime = DateTime.now.strftime("%Y-%m-%d %H:%M:%S").to_s
+open(logfile, 'a') do |f|
+	f << "[#{nowtime}] Got"
+	f << " host " << host
+	f << " state " << options[:state]
+	f << " type " << options[:type]
+	f << " color " << color
+	f << " comment " << options[:comment]
+	f << " ntype " << ntype
+	f << " description " << description
+	f << " output " << output
+	f << "\n"
+end
+
+comment = options[:comment]
+if options[:ntype] == "ACKNOWLEDGEMENT"
+	color = "green"
+	if not comment.nil?
+		output = comment
+		open(logfile, 'a') do |f|
+			f << "Changed output to comment #{comment}\n"
+		end
+	end
+end
+
+hlink = "http://nagios.bar.local/nagios/cgi-bin/status.cgi"
+hlinked = "<a href=\"#{hlink}?host=#{host}\">#{host}</a>"
+
+dlink = "http://nagios.bar.local/nagios/cgi-bin/extinfo.cgi"
+dlinked = "<a href=\"#{dlink}?type=2&host=#{host}&service=#{description}\">#{description}</a>"
+
+if options[:type] == "host"
+	message = "<strong>#{hlinked}</strong> #{ntype} #{output}"
+elsif options[:type] == "service"
+	message = "<strong>#{hlinked}</strong> #{ntype} [#{dlinked}] #{output}"
+else
+	puts "Unknown event type"
+	exit
+end
+
+room = options[:room]
+token = options[:token]
+
+response = HTTParty.post("https://api.hipchat.com/v2/room/#{room}/notification?auth_token=#{token}",
+	:body => {
+		:color => color,
+		:message => message,
+		:notify => false,
+		:message_format => "html",
+	}.to_json,
+	:headers => {
+		'Content-Type' => 'application/json',
+	},
+	debug_output: $stderr)
+
+#p options
+#p ARGV
